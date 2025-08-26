@@ -33,15 +33,21 @@ type Config struct {
 }
 
 type AvailableIssueObject struct {
-	CompanyShareId int
-	SubGroup       string
-	Scrip          string
-	CompanyName    string
-	ShareTypeName  string
-	ShareGroupName string
-	StatusName     string
-	IssueOpenDate  string
-	IssueCloseDate string
+	CompanyShareId      int
+	SubGroup            string
+	Scrip               string
+	CompanyName         string
+	ShareTypeName       string
+	ShareGroupName      string
+	ReservationTypeName string
+	StatusName          string
+	IssueOpenDate       string
+	IssueCloseDate      string
+}
+
+type ShareCriteria struct {
+	Id               int `json:"id"`
+	ReservedQuantity int `json:"reservedQuantity"`
 }
 
 type BankBrief struct {
@@ -343,47 +349,92 @@ func DoWork(configFileName string) {
 
 	scripsToApply := []ScripToApply{}
 	for _, scrip := range availableScrips {
-		if !config.AskForKittas {
-			if scrip.ShareGroupName == "Ordinary Shares" {
+		if scrip.ReservationTypeName == "RIGHT SHARE" {
+			// Call API to get reserved quantity for right share
+			shareCriteriaURL := fmt.Sprintf("https://webbackend.cdsc.com.np/api/shareCriteria/boid/130%s00%s/%d", config.DPID, config.BOID, scrip.CompanyShareId)
+			request, _ := http.NewRequest("GET", shareCriteriaURL, nil)
+			request.Header.Add("Authorization", authToken)
+			request.Header.Add("Content-Type", "application/json")
+			client := &http.Client{}
+			Log("hello11")
+			Log("Fetching right share criteria for " + scrip.CompanyName + " URI:" + shareCriteriaURL)
+			response, err := client.Do(request)
+			if err != nil || response.StatusCode != 200 {
+				Log(logAPIError(response, err, fmt.Sprintf("Error fetching right share criteria for %s", scrip.CompanyName)))
+				continue
+			}
+			defer response.Body.Close()
+			Log("hello")
+			var shareCriteria ShareCriteria
+			err = json.NewDecoder(response.Body).Decode(&shareCriteria)
+			if err != nil {
+				Log(fmt.Sprint("Error parsing right share criteria JSON for ", scrip.CompanyName))
+				continue
+			}
+			Log("hello2")
+			Log("Fetched right share criteria for " + scrip.CompanyName +
+				" kitta to be applied:" + strconv.Itoa(shareCriteria.ReservedQuantity))
+			if shareCriteria.ReservedQuantity <= 0 {
+				Log(fmt.Sprint("No reserved quantity for right share: ", scrip.CompanyName))
+				continue
+			}
+
+			Log(fmt.Sprint(scrip.CompanyName, " - ", scrip.ReservationTypeName, " (Reserved: ", shareCriteria.ReservedQuantity, " kittas, ", scrip.IssueOpenDate, " - ", scrip.IssueCloseDate, ")"))
+
+			var scripToApply ScripToApply
+			scripToApply.BankIdToApply = config.DefaultBankID
+			scripToApply.KittasToApply = strconv.Itoa(shareCriteria.ReservedQuantity)
+			scripToApply.CompanyShareId = strconv.Itoa(scrip.CompanyShareId)
+			scripToApply.CompanyName = scrip.CompanyName
+			Log("Right share script to be applied: " + scripToApply.String())
+			scripsToApply = append(scripsToApply, scripToApply)
+
+		} else if scrip.ShareGroupName == "Ordinary Shares" {
+			if !config.AskForKittas {
 				var scripToApply ScripToApply
 				scripToApply.BankIdToApply = config.DefaultBankID
 				scripToApply.KittasToApply = strconv.Itoa(config.DefaultKittas)
 				scripToApply.CompanyShareId = strconv.Itoa(scrip.CompanyShareId)
 				scripToApply.CompanyName = scrip.CompanyName
 				scripsToApply = append(scripsToApply, scripToApply)
+			} else {
+				Log(fmt.Sprint(scrip.CompanyName, " - ", scrip.ShareGroupName, " (", scrip.IssueOpenDate, " - ", scrip.IssueCloseDate, ")"))
+				fmt.Println("Enter the no. of kittas to apply (0 for none): ")
+				reader := bufio.NewReader(os.Stdin)
+				kittasStr, _ := reader.ReadString('\n')
+				kittas := 0
+				fmt.Sscan(strings.TrimSpace(kittasStr), &kittas)
+				if kittas > 0 {
+					var scripToApply ScripToApply
+					scripToApply.BankIdToApply = config.DefaultBankID
+					scripToApply.KittasToApply = strconv.Itoa(kittas)
+					scripToApply.CompanyShareId = strconv.Itoa(scrip.CompanyShareId)
+					scripToApply.CompanyName = scrip.CompanyName
+					scripsToApply = append(scripsToApply, scripToApply)
+				}
 			}
-		} else {
-			Log(fmt.Sprint(scrip.CompanyName, "-", scrip.ShareGroupName, "(", scrip.IssueOpenDate, "-", scrip.IssueCloseDate, ")"))
-			fmt.Println("Enter the no. of kittas to apply (0 for none): ")
-			reader := bufio.NewReader(os.Stdin)
-			kittasStr, _ := reader.ReadString('\n')
-			kittas := 0
-			fmt.Sscan(strings.TrimSpace(kittasStr), &kittas)
-			if kittas > 0 {
-				var scripToApply ScripToApply
-				scripToApply.BankIdToApply = config.DefaultBankID
-				scripToApply.KittasToApply = strconv.Itoa(kittas)
-				scripToApply.CompanyShareId = strconv.Itoa(scrip.CompanyShareId)
-				scripToApply.CompanyName = scrip.CompanyName
-				scripsToApply = append(scripsToApply, scripToApply)
-			}
-
 		}
-	}
+	} // end for loop for availableScrips
 
 	if len(scripsToApply) == 0 {
-		Log(fmt.Sprint("No IPOs open right now. Quitting.\n"))
+		Log(fmt.Sprint("No IPOs or right shares open right now. Quitting.\n"))
 		return
 	}
+	//bankDetail := "https://webbackend.cdsc.com.np/api/meroShare/bank/" + strconv.Itoa(config.DefaultBankID)
+
+	//Log("Making API call to get bank details for  bankid: " + strconv.Itoa(config.DefaultBankID))
 
 	//retrieve accountNumber and customerId fields (required to apply) from an API call to get the default bank's details
+	//request, err = http.NewRequest("GET", bankDetail, nil)
 	request, _ = http.NewRequest("GET", "https://webbackend.cdsc.com.np/api/meroShare/bank/"+strconv.Itoa(config.DefaultBankID), nil)
 	request.Header.Add("Authorization", authToken)
 	request.Header.Add("Content-Type", "application/json")
 	client = &http.Client{}
+
 	response, err = client.Do(request)
 	if err != nil || response.StatusCode != 200 {
-		Panic("Error getting bank details!")
+		Log(logAPIError(response, err, fmt.Sprintf("Error getting bank details %s", strconv.Itoa(config.DefaultBankID))))
+		//return
 	}
 	defer response.Body.Close()
 
@@ -392,6 +443,8 @@ func DoWork(configFileName string) {
 	if err != nil {
 		Panic("Error parsing bank details JSON!")
 	}
+
+	Log("Fetched bank detail for bankId: " + strconv.Itoa(config.DefaultBankID))
 
 	//take the first element of the JSON array, which is the required BankDetail JSON object
 	bankDetail := bankDetails[0]
@@ -646,4 +699,42 @@ func Log(msg string) {
 func Panic(msg string) {
 	Log(msg)
 	panic(msg)
+}
+
+// Helper function to read and log API error responses
+func logAPIError(response *http.Response, err error, context string) string {
+	if err != nil {
+		return fmt.Sprintf("%s: %v", context, err)
+	}
+	if response == nil {
+		return fmt.Sprintf("%s: No response received", context)
+	}
+
+	defer response.Body.Close()
+	body, readErr := io.ReadAll(response.Body)
+	if readErr != nil {
+		return fmt.Sprintf("%s: Failed to read response body: %v", context, readErr)
+	}
+
+	// Try to parse as JSON to extract error message
+	var jsonErr map[string]interface{}
+	if json.Unmarshal(body, &jsonErr) == nil {
+		if msg, ok := jsonErr["message"]; ok {
+			return fmt.Sprintf("%s: HTTP %d - %v", context, response.StatusCode, msg)
+		}
+		return fmt.Sprintf("%s: HTTP %d - %v", context, response.StatusCode, jsonErr)
+	}
+
+	// Fallback to plain text if not JSON
+	return fmt.Sprintf("%s: HTTP %d - %s", context, response.StatusCode, string(body))
+}
+
+func (s ScripToApply) String() string {
+	return fmt.Sprintf(
+		"ScripToApply => BankIdToApply: %s, KittasToApply: %s, CompanyShareId: %s, CompanyName: %s",
+		s.BankIdToApply,
+		s.KittasToApply,
+		s.CompanyShareId,
+		s.CompanyName,
+	)
 }
