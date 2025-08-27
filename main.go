@@ -57,10 +57,12 @@ type BankBrief struct {
 }
 
 type ScripToApply struct {
-	CompanyShareId string
-	KittasToApply  string
-	BankIdToApply  int
-	CompanyName    string
+	CompanyShareId  string
+	KittasToApply   string
+	BankIdToApply   int
+	CompanyName     string
+	ShareCriteriaId int
+	IsRightShare    bool
 }
 
 type BankDetail struct {
@@ -113,6 +115,22 @@ type ApplyScripPayloadJSON struct {
 	CustomerId      int    `json:"customerId"`
 	Demat           string `json:"demat"`
 	TransactionPIN  string `json:"transactionPIN"`
+	AccountTypeId   int    `json:"accountTypeId"`
+}
+
+type ApplyRightShareScripPayloadJSON struct {
+	AccountBranchId int    `json:"accountBranchId"`
+	AccountNumber   string `json:"accountNumber"`
+	AppliedKitta    string `json:"appliedKitta"`
+	BankId          int    `json:"bankId"`
+	Boid            string `json:"boid"`
+	CompanyShareId  string `json:"companyShareId"`
+	CrnNumber       string `json:"crnNumber"`
+	CustomerId      int    `json:"customerId"`
+	Demat           string `json:"demat"`
+	TransactionPIN  string `json:"transactionPIN"`
+	AccountTypeId   int    `json:"accountTypeId"`
+	ShareCriteriaId int    `json:"shareCriteriaId"`
 }
 
 func main() {
@@ -382,8 +400,10 @@ func DoWork(configFileName string) {
 			Log(fmt.Sprint(scrip.CompanyName, " - ", scrip.ReservationTypeName, " (Reserved: ", shareCriteria.ReservedQuantity, " kittas, ", scrip.IssueOpenDate, " - ", scrip.IssueCloseDate, ")"))
 
 			var scripToApply ScripToApply
+			scripToApply.IsRightShare = true
 			scripToApply.BankIdToApply = config.DefaultBankID
 			scripToApply.KittasToApply = strconv.Itoa(shareCriteria.ReservedQuantity)
+			scripToApply.ShareCriteriaId = shareCriteria.Id
 			scripToApply.CompanyShareId = strconv.Itoa(scrip.CompanyShareId)
 			scripToApply.CompanyName = scrip.CompanyName
 			Log("Right share script to be applied: " + scripToApply.String())
@@ -444,11 +464,27 @@ func DoWork(configFileName string) {
 		Panic("Error parsing bank details JSON!")
 	}
 
-	Log("Fetched bank detail for bankId: " + strconv.Itoa(config.DefaultBankID))
-
 	//take the first element of the JSON array, which is the required BankDetail JSON object
 	bankDetail := bankDetails[0]
+	Log("Fetched bank detail for bankId: " + bankDetail.AccountNumber + " accountTypeId=" + strconv.Itoa(bankDetail.AccountTypeId))
+	var rightShares []ScripToApply
+	var normalShares []ScripToApply
+	// Split based on IsRightShare
+	for _, scrip := range scripsToApply {
+		if scrip.IsRightShare {
+			rightShares = append(rightShares, scrip)
+		} else {
+			normalShares = append(normalShares, scrip)
+		}
+	}
+	applyIpo(bankDetail, ownDetail, config, normalShares, request, authToken, client, response)
+	applyRightShare(bankDetail, ownDetail, config, rightShares, request, authToken, client, response)
 
+	//closing tag
+	Log("\n")
+}
+
+func applyIpo(bankDetail BankDetail, ownDetail OwnDetail, config Config, scripsToApply []ScripToApply, request *http.Request, authToken string, client *http.Client, response *http.Response) {
 	//apply to the companies in scripstoApply slice
 	applyReqJson := &ApplyScripPayloadJSON{
 		AccountBranchId: bankDetail.AccountBranchId,
@@ -458,6 +494,7 @@ func DoWork(configFileName string) {
 		Demat:           ownDetail.Demat,
 		CustomerId:      bankDetail.Id,
 		TransactionPIN:  config.TransactionPIN,
+		AccountTypeId:   bankDetail.AccountTypeId,
 	}
 	for _, scrip := range scripsToApply {
 		applyReqJson.AppliedKitta = scrip.KittasToApply
@@ -479,9 +516,42 @@ func DoWork(configFileName string) {
 			Log(fmt.Sprint("Applied ", applyReqJson.AppliedKitta, " kittas to - ", scrip.CompanyName))
 		}
 	}
+}
 
-	//closing tag
-	Log("\n")
+func applyRightShare(bankDetail BankDetail, ownDetail OwnDetail, config Config, scripsToApply []ScripToApply,
+	request *http.Request, authToken string, client *http.Client, response *http.Response) {
+	//apply to the companies in scripstoApply slice
+	applyReqJson := &ApplyRightShareScripPayloadJSON{
+		AccountBranchId: bankDetail.AccountBranchId,
+		AccountNumber:   bankDetail.AccountNumber,
+		Boid:            ownDetail.Boid,
+		CrnNumber:       config.CRN,
+		Demat:           ownDetail.Demat,
+		CustomerId:      bankDetail.Id,
+		TransactionPIN:  config.TransactionPIN,
+		AccountTypeId:   bankDetail.AccountTypeId,
+	}
+	for _, scrip := range scripsToApply {
+		applyReqJson.AppliedKitta = scrip.KittasToApply
+		applyReqJson.BankId = scrip.BankIdToApply
+		applyReqJson.CompanyShareId = scrip.CompanyShareId
+		applyReqJson.ShareCriteriaId = scrip.ShareCriteriaId
+
+		reqjson, err := json.Marshal(applyReqJson)
+		if err != nil {
+			Log("Cannot build apply JSON payload!")
+		}
+		request, _ = http.NewRequest("POST", "https://webbackend.cdsc.com.np/api/meroShare/applicantForm/share/apply", bytes.NewBuffer(reqjson))
+		request.Header.Add("Authorization", authToken)
+		request.Header.Add("Content-Type", "application/json")
+		client = &http.Client{}
+		response, err = client.Do(request)
+		if err != nil || response.StatusCode != 201 {
+			Log(fmt.Sprint("Error applying to scrip - ", scrip.CompanyName))
+		} else {
+			Log(fmt.Sprint("Applied ", applyReqJson.AppliedKitta, " kittas to - ", scrip.CompanyName))
+		}
+	}
 }
 
 func showIntroMsg() {
